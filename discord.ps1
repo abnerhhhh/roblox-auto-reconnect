@@ -1,5 +1,5 @@
 ﻿param(
-    [ValidateSet('Monitor','Snapshot','Test','Check','Inspect')]
+    [ValidateSet('Monitor','Snapshot','Test','Check','Inspect','CaptureSelfTest')]
     [string]$Mode = 'Monitor'
 )
 $ErrorActionPreference = 'Stop'
@@ -113,52 +113,49 @@ function Get-Observation {
     if ($joins.Count) { $actualPlace = $joins[$joins.Count - 1].Groups[1].Value }
     return (Apply-VisualState @{ state = (Get-LogState $text); pid = $player.Id; log = $logs[0].Name; place = $actualPlace })
 }
-function Initialize-Capture {
-    if ('ReconnectCapture' -as [type]) { return }
-    Add-Type -AssemblyName System.Drawing
-    Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-public static class ReconnectCapture {
-    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
-    [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
-    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
-    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
-    [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hwnd, out RECT rect);
-    [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr hwnd, ref POINT point);
-    [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hwnd);
-    [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
-}
-'@
-    [void][ReconnectCapture]::SetProcessDPIAware()
-}
 function Capture-Game {
-    Initialize-Capture
-    $hwnd = [ReconnectCapture]::GetForegroundWindow()
-    [uint32]$foregroundPID = 0
-    [void][ReconnectCapture]::GetWindowThreadProcessId($hwnd, [ref]$foregroundPID)
-    $player = Get-Process -Id $foregroundPID -ErrorAction SilentlyContinue
-    if (!$player -or $player.ProcessName -ne 'RobloxPlayerBeta' -or [ReconnectCapture]::IsIconic($hwnd)) { return $null }
-    $rect = [ReconnectCapture+RECT]::new()
-    $point = [ReconnectCapture+POINT]::new()
-    if (![ReconnectCapture]::GetClientRect($hwnd, [ref]$rect) -or ![ReconnectCapture]::ClientToScreen($hwnd, [ref]$point)) { return $null }
-    $width = $rect.Right - $rect.Left
-    $height = $rect.Bottom - $rect.Top
-    if ($width -le 0 -or $height -le 0 -or $width -gt 16384 -or $height -gt 16384) { return $null }
-    $bitmap = [Drawing.Bitmap]::new($width, $height)
-    $graphics = [Drawing.Graphics]::FromImage($bitmap)
-    $memory = [IO.MemoryStream]::new()
+    $script:captureFailure = ''
+    $players = @(Get-Process -Name RobloxPlayerBeta -ErrorAction SilentlyContinue)
+    if ($players.Count -ne 1) {
+        $script:captureFailure = '找不到唯一的 Roblox 程序。'
+        return $null
+    }
+    $helper = Join-Path $base 'capture-window.exe'
+    if (!(Test-Path -LiteralPath $helper)) {
+        $script:captureFailure = '缺少背景截圖工具。'
+        return $null
+    }
+    $imagePath = Join-Path $env:TEMP ('roblox-capture-' + [guid]::NewGuid().ToString('N') + '.png')
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $helper
+    $startInfo.Arguments = [string]$players[0].Id + ' "' + $imagePath + '"'
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
     try {
-        if ([ReconnectCapture]::GetForegroundWindow() -ne $hwnd) { return $null }
-        $graphics.CopyFromScreen($point.X, $point.Y, 0, 0, $bitmap.Size)
-        # Discard a capture if the user switched apps while it was being taken.
-        if ([ReconnectCapture]::GetForegroundWindow() -ne $hwnd) { return $null }
-        $bitmap.Save($memory, [Drawing.Imaging.ImageFormat]::Png)
-        return ,$memory.ToArray()
+        if (!$process.Start()) {
+            $script:captureFailure = '背景截圖工具無法啟動。'
+            return $null
+        }
+        if (!$process.WaitForExit(9000)) {
+            $process.Kill()
+            $process.WaitForExit()
+            $script:captureFailure = '背景截圖逾時。'
+            return $null
+        }
+        if ($process.ExitCode -ne 0 -or !(Test-Path -LiteralPath $imagePath)) {
+            $script:captureFailure = switch ($process.ExitCode) {
+                3 { 'Roblox 視窗不存在或已最小化。' }
+                4 { '未取得新的 Roblox 畫面。' }
+                default { 'Windows 無法擷取 Roblox 視窗。' }
+            }
+            return $null
+        }
+        return ,([IO.File]::ReadAllBytes($imagePath))
     } finally {
-        $memory.Dispose()
-        $graphics.Dispose()
-        $bitmap.Dispose()
+        $process.Dispose()
+        if (Test-Path -LiteralPath $imagePath) { Remove-Item -LiteralPath $imagePath -Force }
     }
 }
 function New-Payload([string]$message, [bool]$hasImage) {
@@ -182,10 +179,10 @@ function Send-Discord([string]$message, [bool]$withScreenshot, [string]$state = 
     if ($withScreenshot) { $image = Capture-Game }
     if ($withScreenshot -and !$image) {
         if ($skipWithoutImage) {
-            Write-Status '略過定時截圖：Roblox 未在最前方；60 秒後再檢查。' $state
+            Write-Status ('略過定時截圖：' + $script:captureFailure + ' 60 秒後再檢查。') $state
             return $false
         }
-        $message += "`n未附截圖：Roblox 未在最前方或無法擷取。"
+        $message += "`n未附截圖：" + $script:captureFailure
     }
     if ($image -and $image.Length -gt 9500000) {
         Write-Status '截圖超過上傳大小限制；60 秒後再檢查。' $state
@@ -223,7 +220,7 @@ if ($Mode -eq 'Check') {
     if ((Get-LogState 'MegaReplicatorLogDisconnectCleanUpLog') -ne 'unknown') { throw 'Cleanup incorrectly classified' }
     $sample = New-Payload '文字 "quote" \ and newline' $true | ConvertFrom-Json
     if ($sample.embeds[0].image.url -ne 'attachment://roblox.png' -or $sample.allowed_mentions.parse.Count -ne 0) { throw 'Payload failed' }
-    Initialize-Capture
+    if (!(Test-Path -LiteralPath (Join-Path $base 'capture-window.exe'))) { throw 'Capture helper missing' }
     $t=Get-Date
     if(Screenshot-Due $t ($t.AddSeconds(-3600)) ($t.AddSeconds(-59)) 3600){throw 'Early retry'}
     if(!(Screenshot-Due $t ($t.AddSeconds(-3600)) ($t.AddSeconds(-60)) 3600)){throw 'Missed retry'}
@@ -234,6 +231,24 @@ if ($Mode -eq 'Inspect') {
     $observation = Get-Observation
     $observation | ConvertTo-Json -Compress
     exit 0
+}
+if ($Mode -eq 'CaptureSelfTest') {
+    $helper = Join-Path $base 'capture-window.exe'
+    $imagePath = Join-Path $env:TEMP ('roblox-capture-self-test-' + [guid]::NewGuid().ToString('N') + '.png')
+    try {
+        & $helper --self-test $imagePath
+        if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $imagePath)) { throw 'Window capture self-test failed' }
+        Add-Type -AssemblyName System.Drawing
+        $bitmap = [Drawing.Bitmap]::new($imagePath)
+        try {
+            $pixel = $bitmap.GetPixel([int]($bitmap.Width / 2), [int]($bitmap.Height / 2))
+            if ($pixel.G -lt 150 -or $pixel.R -gt 80 -or $pixel.B -gt 80) { throw 'Captured covering window instead of target' }
+        } finally { $bitmap.Dispose() }
+        Write-Output 'PASS: covered target window captured without foreground focus. No Discord message sent.'
+        exit 0
+    } finally {
+        if (Test-Path -LiteralPath $imagePath) { Remove-Item -LiteralPath $imagePath -Force }
+    }
 }
 try {
     if ($Mode -eq 'Test') {

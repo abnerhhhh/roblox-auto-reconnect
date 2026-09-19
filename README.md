@@ -7,12 +7,12 @@
 3. Discord：在要接收通知的頻道中，開啟「編輯頻道 → 整合 → Webhook」建立 Webhook，複製網址並貼入腳本設定。
 4. 按「測試 Webhook」，確認頻道收到訊息。
 5. 勾選「啟用 Discord 斷線與恢復通知」後儲存，開始背景監看。
-6. Roblox 位於最前方時，按 F8 傳送目前遊戲截圖與判讀狀態。
-7. 若需要定時畫面，勾選「定時傳送最前方 Roblox 遊戲畫面」，設定秒數並儲存。預設 300 秒，最少 60 秒；必須同時啟用 Discord 監看。
+6. 按 F8 傳送目前 Roblox 視窗截圖與判讀狀態；Roblox 被其他視窗遮住時也可擷取。
+7. 若需要定時畫面，勾選「定時傳送 Roblox 視窗畫面（可在背景）」，設定秒數並儲存。預設 300 秒，最少 60 秒；必須同時啟用 Discord 監看。
 8. 關閉設定視窗後快捷鍵與監看仍有效。右鍵系統匣 AutoHotkey 圖示，選「結束重連腳本」才會停止監看。
 
-按「傳送畫面」按鈕時會先隱藏設定視窗；Roblox 不在最前方時只傳文字，不擷取桌面。
-定時截圖遇到 Roblox 不在最前方時，會略過該次，不傳文字洗版；60 秒後再檢查，不會重置整個截圖間隔。傳送失敗或 Discord 限流時也會在至少 60 秒後重試；只有成功傳送截圖才重新計算完整間隔。背景監看遇到暫時錯誤會記錄於 monitor-errors.log 並繼續運作，若程序結束則由主腳本重新啟動。
+截圖使用 Windows Graphics Capture 指定 Roblox 視窗，不擷取桌面上覆蓋它的其他應用程式。按「傳送畫面」仍會先隱藏設定視窗。
+定時截圖在 Roblox 視窗不存在、已最小化或擷取失敗時會略過，60 秒後再檢查，不會重置整個截圖間隔。傳送失敗或 Discord 限流時也會在至少 60 秒後重試；只有成功傳送截圖才重新計算完整間隔。背景監看遇到暫時錯誤會記錄於 monitor-errors.log 並繼續運作，若程序結束則由主腳本重新啟動。
 
 ## Discord 通知
 
@@ -33,8 +33,10 @@ Roblox 程序存在不等於仍在遊戲內連線。
 Client:Disconnect 也可能是正常離開伺服器，因此通知不會斷言一定是網路故障。
 畫面偵測使用 NatroMacro 的英文斷線提示圖樣及數個縮放比例；中文介面、新版提示或不同字型可能無法匹配。
 畫面斷線提示消失只代表提示消失，並不證明恢復連線。
-畫面偵測與截圖只在 Roblox 位於最前方時進行；不搶視窗焦點、不還原最小化遊戲。
-截圖取 Roblox 用戶區域，沒有錄影或 Discord 語音直播功能。
+斷線提示的圖樣偵測仍只在 Roblox 位於最前方時進行；截圖則可擷取被其他視窗遮住的 Roblox。腳本不搶視窗焦點，也不還原最小化遊戲。
+Windows Graphics Capture 無法從最小化的視窗取得新影格；若擷取服務無法提供影格，定時截圖會略過並重試，不會傳送黑畫面或其他視窗內容。截圖包含 Roblox 視窗（可能含標題列），沒有錄影或 Discord 語音直播功能。
+
+背景截圖由 `capture-window.exe` 執行；其原始碼為 `capture-window.cpp`，需要 Windows 10 1903 或更新版本。需要重建時，安裝 Visual Studio 2022 C++ 工具與 Windows SDK 後執行 `build-capture.cmd`。可用 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File discord.ps1 -Mode CaptureSelfTest` 做本機遮擋擷取測試；測試不會傳送 Discord 訊息。
 
 ## 重連
 
@@ -73,7 +75,7 @@ https://github.com/AutoHotkey/AutoHotkey/blob/v2.0.12/license.txt
 assets/disconnected.png 複製自 NatroMacro/nm_image_assets/general/disconnected.png。
 原 NatroMacro 授權保留於 LICENSE-NatroMacro.md；未啟動其 Heartbeat 或其他巨集。
 
-reconnect.ahk 與 discord.ps1 為獨立撰寫。
+reconnect.ahk、discord.ps1 與 capture-window.cpp 為獨立撰寫。
 
 連結啟動方式與 Discord API：
 https://github.com/bloxstraplabs/bloxstrap/wiki/A-deep-dive-on-how-the-Roblox-bootstrapper-works
