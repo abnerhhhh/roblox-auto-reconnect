@@ -1,0 +1,7 @@
+settings.ini
+*.log
+discord-status*
+discord-monitor.stop
+visual-disconnect.txt*
+connection-state.txt*
+monitor-errors.log
