@@ -5,6 +5,7 @@ discord-monitor.stop
 visual-disconnect.txt*
 connection-state.txt*
 monitor-errors.log
+last-screenshot.json*
 *.obj
 *.pdb
 *.ilk

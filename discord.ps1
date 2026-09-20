@@ -6,6 +6,7 @@ $ErrorActionPreference = 'Stop'
 $base = $PSScriptRoot
 $configPath = Join-Path $base 'settings.ini'
 $resultPath = Join-Path $base 'discord-status.json'
+$frameStatePath = Join-Path $base 'last-screenshot.json'
 $stopPath = Join-Path $base 'discord-monitor.stop'
 Add-Type -AssemblyName System.Net.Http
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -115,11 +116,14 @@ function Get-Observation {
 }
 function Capture-Game {
     $script:captureFailure = ''
+    $script:captureIdentity = ''
     $players = @(Get-Process -Name RobloxPlayerBeta -ErrorAction SilentlyContinue)
     if ($players.Count -ne 1) {
         $script:captureFailure = '找不到唯一的 Roblox 程序。'
         return $null
     }
+    $player = $players[0]
+    $script:captureIdentity = '{0}:{1}' -f $player.Id, $player.StartTime.ToUniversalTime().Ticks
     $helper = Join-Path $base 'capture-window.exe'
     if (!(Test-Path -LiteralPath $helper)) {
         $script:captureFailure = '缺少背景截圖工具。'
@@ -168,6 +172,26 @@ function New-Payload([string]$message, [bool]$hasImage) {
 function Screenshot-Due([datetime]$now, [datetime]$lastSuccess, [datetime]$lastAttempt, [int]$intervalSeconds) {
     return ($now - $lastSuccess).TotalSeconds -ge $intervalSeconds -and ($now - $lastAttempt).TotalSeconds -ge 60
 }
+function Get-FrameHash([byte[]]$image) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { return [Convert]::ToBase64String($sha.ComputeHash($image)) }
+    finally { $sha.Dispose() }
+}
+function Read-FrameState([string]$path = $frameStatePath) {
+    try {
+        if (Test-Path -LiteralPath $path) { return (Get-Content -LiteralPath $path -Raw | ConvertFrom-Json) }
+    } catch {}
+    return $null
+}
+function Is-SameFrame($previous, [string]$identity, [string]$hash) {
+    return $null -ne $previous -and $previous.identity -ceq $identity -and $previous.hash -ceq $hash
+}
+function Write-FrameState([string]$identity, [string]$hash, [string]$path = $frameStatePath) {
+    $tempPath = $path + '.' + $PID + '.tmp'
+    $value = @{ identity = $identity; hash = $hash; time = (Get-Date).ToString('o') } | ConvertTo-Json -Compress
+    [IO.File]::WriteAllText($tempPath, $value, [Text.UTF8Encoding]::new($false))
+    Move-Item -LiteralPath $tempPath -Destination $path -Force
+}
 function Send-Discord([string]$message, [bool]$withScreenshot, [string]$state = '', [bool]$skipWithoutImage = $false) {
     $settings = Read-Settings
     $url = [string]$settings['Discord.Webhook']
@@ -188,6 +212,14 @@ function Send-Discord([string]$message, [bool]$withScreenshot, [string]$state = 
         Write-Status '截圖超過上傳大小限制；60 秒後再檢查。' $state
         return $false
     }
+    $frameHash = ''
+    if ($image) {
+        $frameHash = Get-FrameHash $image
+        if ($skipWithoutImage -and (Is-SameFrame (Read-FrameState) $script:captureIdentity $frameHash)) {
+            Write-Status '定時截圖與上次成功傳送的畫面相同；本次略過，60 秒後再檢查。' $state
+            return $false
+        }
+    }
     $body = New-Payload $message ([bool]$image)
     $client = [Net.Http.HttpClient]::new()
     $client.Timeout = [TimeSpan]::FromSeconds(20)
@@ -202,7 +234,11 @@ function Send-Discord([string]$message, [bool]$withScreenshot, [string]$state = 
         }
         $response = $client.PostAsync($url + '?wait=true', $form).GetAwaiter().GetResult()
         try {
-            if ($response.IsSuccessStatusCode) { Write-Status 'Discord 訊息已送出。' $state; return $true }
+            if ($response.IsSuccessStatusCode) {
+                if ($image) { try { Write-FrameState $script:captureIdentity $frameHash } catch {} }
+                Write-Status 'Discord 訊息已送出。' $state
+                return $true
+            }
             elseif ([int]$response.StatusCode -eq 429) { Write-Status 'Discord 限流；60 秒後再試。' $state }
             else { Write-Status ('Discord 傳送失敗，HTTP ' + [int]$response.StatusCode) $state }
         } finally { $response.Dispose() }
@@ -224,6 +260,15 @@ if ($Mode -eq 'Check') {
     $t=Get-Date
     if(Screenshot-Due $t ($t.AddSeconds(-3600)) ($t.AddSeconds(-59)) 3600){throw 'Early retry'}
     if(!(Screenshot-Due $t ($t.AddSeconds(-3600)) ($t.AddSeconds(-60)) 3600)){throw 'Missed retry'}
+    $hashA = Get-FrameHash ([byte[]]@(1,2,3))
+    $hashB = Get-FrameHash ([byte[]]@(1,2,4))
+    if ($hashA -eq $hashB -or !(Is-SameFrame ([pscustomobject]@{identity='one';hash=$hashA}) 'one' $hashA)) { throw 'Duplicate frame detection failed' }
+    if (Is-SameFrame ([pscustomobject]@{identity='one';hash=$hashA}) 'two' $hashA) { throw 'New Roblox session incorrectly deduplicated' }
+    $testState = Join-Path $env:TEMP ('roblox-frame-state-' + [guid]::NewGuid().ToString('N') + '.json')
+    try {
+        Write-FrameState 'one' $hashA $testState
+        if (!(Is-SameFrame (Read-FrameState $testState) 'one' $hashA)) { throw 'Frame state did not persist' }
+    } finally { if (Test-Path -LiteralPath $testState) { Remove-Item -LiteralPath $testState -Force } }
     Write-Output 'PASS: log transitions, webhook validation, JSON attachment payload and capture API. No message or screenshot sent.'
     exit 0
 }
